@@ -4,18 +4,26 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Call
 import configparser
 import json
 
-# Загрузка данных из JSON-файла
+# Загрузка данных из JSON-файлов
 def load_routes_data():
     with open('bot_db.json', 'r', encoding='utf-8') as file:
         return json.load(file)
+
+def load_comments_data():
+    try:
+        with open('comments_db.json', 'r', encoding='utf-8') as file:
+            return json.load(file)
+    except FileNotFoundError:
+        return {}  # Если файл не найден, возвращаем пустой словарь
 
 # Чтение конфигурации
 config = configparser.ConfigParser()
 config.read('settings.ini')
 tgramm_token = config['TOKEN']['token']
 
-# Загружаем данные о маршрутах
+# Загружаем данные о маршрутах и комментариях
 routes_data = load_routes_data()
+comments_data = load_comments_data()
 
 # Функция для обновления клавиатуры
 async def update_keyboard(context: CallbackContext) -> None:
@@ -129,21 +137,39 @@ async def button_click(update: Update, context: CallbackContext) -> None:
             await query.edit_message_text(text="❌ Невозможно вернуться назад. Нажмите /start, чтобы начать заново.")
     elif query.data == 'cancel':
         await query.edit_message_text(text="❌ Действие отменено. Нажмите /start, чтобы начать заново.")
+    elif query.data.startswith('address_'):
+        # Обработка нажатия на адрес
+        address = query.data.replace('address_', '')
+        comment = comments_data.get(address, "Комментарий отсутствует.")
+        # Добавляем кнопки "Назад" и "Отмена"
+        keyboard = [
+            [
+                InlineKeyboardButton("⬅️ Назад", callback_data='back'),
+                InlineKeyboardButton("❌ Отмена", callback_data='cancel')
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text=f"📍 Адрес: {address}\n\n💬  {comment}",
+            reply_markup=reply_markup
+        )
     else:
         if '_' in query.data:
             day, route = query.data.split('_', maxsplit=1)
             if day in routes_data and route in routes_data[day]:
                 addresses = routes_data[day][route]
-                address_groups = [addresses[i:i + 5] for i in range(0, len(addresses), 5)]
+                # Формируем текст и клавиатуру
                 response = f"📍 Адреса для маршрута '{route}' ({day}):\n\n"
-                for group in address_groups:
-                    response += "\n".join(group) + "\n\n"
-                keyboard = [
-                    [
-                        InlineKeyboardButton("⬅️ Назад", callback_data='back'),
-                        InlineKeyboardButton("❌ Отмена", callback_data='cancel')
-                    ]
-                ]
+                keyboard = []
+                for address in addresses:
+                    response += f"{address}\n"  # Все адреса добавляются в текст
+                    if address in comments_data:  # Если есть комментарий, добавляем кнопку
+                        keyboard.append([InlineKeyboardButton(f"{address} 💬", callback_data=f"address_{address}")])
+                # Добавляем кнопки "Назад" и "Отмена"
+                keyboard.append([
+                    InlineKeyboardButton("⬅️ Назад", callback_data='back'),
+                    InlineKeyboardButton("❌ Отмена", callback_data='cancel')
+                ])
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await query.edit_message_text(text=response, reply_markup=reply_markup)
                 context.user_data['prev_step'] = 'route_selection'
