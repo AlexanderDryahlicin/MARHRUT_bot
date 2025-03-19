@@ -64,7 +64,7 @@
    
 Настройте конфигурацию:
 Создайте файл settings.ini в корне проекта, внем укажите ваш токен
-   ```bash
+   
    [TOKEN]
    token = YOUR_TELEGRAM_BOT_TOKEN
 
