@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, CallbackContext
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, CallbackContext, MessageHandler, filters
 import configparser
 import json
 
@@ -15,6 +14,10 @@ def load_comments_data():
             return json.load(file)
     except FileNotFoundError:
         return {}  # Если файл не найден, возвращаем пустой словарь
+
+def save_comments_data(comments_data):
+    with open('comments_db.json', 'w', encoding='utf-8') as file:
+        json.dump(comments_data, file, ensure_ascii=False, indent=4)
 
 # Чтение конфигурации
 config = configparser.ConfigParser()
@@ -56,7 +59,6 @@ async def update_keyboard(context: CallbackContext) -> None:
         )
     except Exception as e:
         print(f"Ошибка при обновлении клавиатуры: {e}")
-
 
 # Обработчик команды /start
 async def start(update: Update, context: CallbackContext) -> None:
@@ -100,6 +102,24 @@ async def start(update: Update, context: CallbackContext) -> None:
     else:
         print("Job queue is not available.")
 
+# Обработчик команды /comment
+async def comment(update: Update, context: CallbackContext) -> None:
+    if not context.args:
+        await update.message.reply_text("Использование: /comment <адрес> <комментарий>")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование: /comment <адрес> <комментарий>")
+        return
+
+    address = context.args[0]
+    comment_text = ' '.join(context.args[1:])
+
+    # Сохраняем комментарий
+    comments_data[address] = comment_text
+    save_comments_data(comments_data)
+
+    await update.message.reply_text(f"Комментарий для адреса '{address}' успешно добавлен.")
 
 # Обработчик нажатий на кнопки инлайн-клавиатуры
 async def button_click(update: Update, context: CallbackContext) -> None:
@@ -140,19 +160,46 @@ async def button_click(update: Update, context: CallbackContext) -> None:
     elif query.data.startswith('address_'):
         # Обработка нажатия на адрес
         address = query.data.replace('address_', '')
-        comment = comments_data.get(address, "Комментарий отсутствует.")
-        # Добавляем кнопки "Назад" и "Отмена"
-        keyboard = [
-            [
-                InlineKeyboardButton("⬅️ Назад", callback_data='back'),
-                InlineKeyboardButton("❌ Отмена", callback_data='cancel')
-            ]
-        ]
+        comment = comments_data.get(address, None)
+
+        # Формируем клавиатуру
+        keyboard = []
+
+        # Если комментарий есть, показываем его
+        if comment:
+            text = f"📍 Адрес: {address}\n\n💬  {comment}"
+        else:
+            # Если комментария нет, предлагаем добавить
+            text = f"📍 Адрес: {address}\n\n💬  Комментарий отсутствует."
+            keyboard.append([InlineKeyboardButton("💬 Добавить комментарий", callback_data=f"add_comment_{address}")])
+
+        # Добавляем кнопку "Назад" под кнопкой "Добавить комментарий"
+        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data='back')])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            text=f"📍 Адрес: {address}\n\n💬  {comment}",
+            text=text,
             reply_markup=reply_markup
         )
+    elif query.data.startswith('add_comment_'):
+        # Обработка нажатия на "Добавить комментарий"
+        address = query.data.replace('add_comment_', '')
+        context.user_data['address_for_comment'] = address
+
+        # Формируем клавиатуру с кнопкой "Назад"
+        keyboard = [
+            [InlineKeyboardButton("⬅️ Назад", callback_data=f"address_{address}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Отправляем сообщение с запросом комментария и сохраняем его message_id
+        message = await query.edit_message_text(
+            text=f"Введите комментарий для адреса '{address}':",
+            reply_markup=reply_markup
+        )
+        context.user_data['comment_request_message_id'] = message.message_id
+        # Устанавливаем состояние ожидания комментария
+        context.user_data['waiting_for_comment'] = True
     else:
         if '_' in query.data:
             day, route = query.data.split('_', maxsplit=1)
@@ -162,9 +209,8 @@ async def button_click(update: Update, context: CallbackContext) -> None:
                 response = f"📍 Адреса для маршрута '{route}' ({day}):\n\n"
                 keyboard = []
                 for address in addresses:
-                    response += f"{address}\n"  # Все адреса добавляются в текст
-                    if address in comments_data:  # Если есть комментарий, добавляем кнопку
-                        keyboard.append([InlineKeyboardButton(f"{address} 💬", callback_data=f"address_{address}")])
+                    # Каждый адрес — это отдельная кнопка
+                    keyboard.append([InlineKeyboardButton(address, callback_data=f"address_{address}")])
                 # Добавляем кнопки "Назад" и "Отмена"
                 keyboard.append([
                     InlineKeyboardButton("⬅️ Назад", callback_data='back'),
@@ -195,15 +241,59 @@ async def button_click(update: Update, context: CallbackContext) -> None:
             else:
                 await query.edit_message_text(text="❌ День не найден.")
 
+# Обработчик текстовых сообщений (для комментариев)
+async def handle_message(update: Update, context: CallbackContext) -> None:
+    if context.user_data.get('waiting_for_comment'):
+        address = context.user_data.get('address_for_comment')
+        comment_text = update.message.text
+
+        # Сохраняем комментарий
+        comments_data[address] = comment_text
+        save_comments_data(comments_data)
+
+        # Удаляем сообщение с запросом комментария
+        if 'comment_request_message_id' in context.user_data:
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.message.chat_id,
+                    message_id=context.user_data['comment_request_message_id']
+                )
+            except Exception as e:
+                print(f"Не удалось удалить сообщение с запросом комментария: {e}")
+
+        # Удаляем сообщение пользователя с комментарием
+        try:
+            await context.bot.delete_message(
+                chat_id=update.message.chat_id,
+                message_id=update.message.message_id
+            )
+        except Exception as e:
+            print(f"Не удалось удалить сообщение пользователя: {e}")
+
+        # Формируем клавиатуру с кнопкой "Назад"
+        keyboard = [
+            [InlineKeyboardButton("⬅️ Назад", callback_data=f"address_{address}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            f"Комментарий для адреса '{address}' успешно добавлен.",
+            reply_markup=reply_markup
+        )
+        context.user_data['waiting_for_comment'] = False
+        context.user_data['address_for_comment'] = None
+        context.user_data['comment_request_message_id'] = None
+
 # Основная функция
 def main() -> None:
     application = Application.builder().token(tgramm_token).build()
 
     application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('comment', comment))
     application.add_handler(CallbackQueryHandler(button_click))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     application.run_polling()
-
 
 if __name__ == '__main__':
     main()
